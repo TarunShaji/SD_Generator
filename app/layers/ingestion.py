@@ -134,7 +134,55 @@ class IngestionLayer:
         cms_result: CMSDetectionResult,
         access_token: Optional[str],
     ) -> NormalizedContent:
-        """Ingest content from WordPress."""
+        """Ingest content from WordPress (self-hosted or WordPress.com)."""
+        
+        from urllib.parse import urlparse
+        
+        # =====================================================================
+        # WORDPRESS.COM - Use public API (NOT /wp-json)
+        # =====================================================================
+        
+        if cms_result.cms_type == CMSType.WORDPRESS_COM:
+            parsed = urlparse(cms_result.site_url)
+            site_domain = parsed.netloc
+            
+            self.logger.log_action(
+                "wordpress_com_ingestion",
+                "started",
+                url=url,
+                site_domain=site_domain,
+                has_token=bool(access_token)
+            )
+            
+            if access_token:
+                self.logger.log_decision(
+                    decision="use_wordpress_com_api_authenticated",
+                    reason="WordPress.com with OAuth token",
+                    url=url,
+                    site_domain=site_domain
+                )
+                self.wordpress_adapter.set_access_token(access_token)
+                return await self.wordpress_adapter.fetch_content_wordpress_com(
+                    url=url,
+                    site_domain=site_domain,
+                    authenticated=True
+                )
+            else:
+                self.logger.log_decision(
+                    decision="use_wordpress_com_api_public",
+                    reason="WordPress.com without OAuth token - using public API",
+                    url=url,
+                    site_domain=site_domain
+                )
+                return await self.wordpress_adapter.fetch_content_wordpress_com(
+                    url=url,
+                    site_domain=site_domain,
+                    authenticated=False
+                )
+        
+        # =====================================================================
+        # SELF-HOSTED WORDPRESS - Use /wp-json
+        # =====================================================================
         
         # Check if REST is available
         if cms_result.rest_status == RESTStatus.AVAILABLE:

@@ -198,6 +198,83 @@ _parse_html()
 
 ---
 
+## WordPress.com REST API Fix (2025-12-29)
+
+### 🏗️ Problem
+
+WordPress.com sites (e.g., `site.wordpress.com`) return 404 for `/wp-json/`, causing:
+- CMS classified as `UNKNOWN`
+- Falls back to HTML scraping
+- OAuth never invoked
+- WordPress.com REST API never reached
+
+### ✅ Solution
+
+Implemented early WordPress.com detection and proper public API routing.
+
+---
+
+### 1. Early Domain Detection (`cms_detection.py`)
+
+**Before** probing `/wp-json/`, check if domain ends with `.wordpress.com`:
+
+```python
+if domain.endswith(".wordpress.com"):
+    # Skip /wp-json probe - use public API instead
+```
+
+---
+
+### 2. WordPress.com Public API Probe
+
+Probe the correct API:
+```
+https://public-api.wordpress.com/rest/v1.1/sites/{domain}
+```
+
+---
+
+### 3. WordPress.com Adapter Methods (`wordpress.py`)
+
+| Method | Purpose |
+|--------|---------|
+| `fetch_content_wordpress_com()` | Fetch content from WordPress.com public API |
+| `_find_content_wordpress_com()` | Find pages/posts via `/posts?type=page&slug={slug}` |
+| `_normalize_wordpress_com_content()` | Normalize WordPress.com API response |
+
+---
+
+### 4. Ingestion Routing (`ingestion.py`)
+
+WordPress.com now routes to `fetch_content_wordpress_com()`:
+```python
+if cms_result.cms_type == CMSType.WORDPRESS_COM:
+    return await adapter.fetch_content_wordpress_com(url, site_domain)
+```
+
+---
+
+### Extensive Logging
+
+```json
+{"event": "wordpress_com_early_detection", "domain_match": true, "domain": "site.wordpress.com"}
+{"event": "wordpress_com_public_api_probe", "status": "success", "site_name": "My Site"}
+{"event": "wordpress_com_api_request", "status": "trying_pages", "slug": "about"}
+{"event": "wordpress_com_content_found", "type": "page", "title": "About Us"}
+```
+
+---
+
+### Files Changed
+
+| File | Changes |
+|------|---------|
+| `app/layers/cms_detection.py` | Early `.wordpress.com` detection, `_detect_wordpress_com_public_api()` |
+| `app/adapters/wordpress.py` | `fetch_content_wordpress_com()`, `_find_content_wordpress_com()`, `_normalize_wordpress_com_content()` |
+| `app/layers/ingestion.py` | Route `CMSType.WORDPRESS_COM` to public API |
+
+---
+
 ## Previous Changes
 
 See git history for earlier changes.

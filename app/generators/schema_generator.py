@@ -315,10 +315,11 @@ class SchemaGenerator:
             })
         
         # Image - prefer product_images from JSON-LD if available
+        # ALWAYS output as array - Google prefers array format
         image = None
         if caps and caps.has_product_images and content.product_images:
-            # Use first JSON-LD image or full array
-            image = content.product_images[0] if len(content.product_images) == 1 else content.product_images
+            # Always use array format
+            image = content.product_images
             field_decisions.append({
                 "field": "image",
                 "included": True,
@@ -326,12 +327,14 @@ class SchemaGenerator:
                 "source": "jsonld"
             })
         else:
-            image = self._get_primary_image(content)
-            if image:
+            primary_image = self._get_primary_image(content)
+            if primary_image:
+                # Wrap single image in array for consistency
+                image = [primary_image]
                 field_decisions.append({
                     "field": "image",
                     "included": True,
-                    "reason": "Image from DOM",
+                    "reason": "Image from DOM (wrapped in array)",
                     "source": "dom"
                 })
         

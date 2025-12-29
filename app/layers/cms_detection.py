@@ -123,15 +123,67 @@ class CMSDetectionLayer:
         Detect WordPress and check REST API availability.
         
         Strategy:
-        1. Probe /wp-json/
-        2. 200 OK → WordPress (self-hosted), REST available
-        3. 401/403 → WordPress detected, REST blocked (possible WordPress.com)
-        4. 404 → Not WordPress
+        1. FIRST: Check if domain is *.wordpress.com (early detection)
+        2. Probe /wp-json/
+        3. 200 OK → WordPress (self-hosted), REST available
+        4. 401/403 → WordPress detected, REST blocked (possible WordPress.com)
+        5. 404 → Not WordPress
         """
+        parsed = urlparse(site_url)
+        domain = parsed.netloc.lower()
+        
+        # =====================================================================
+        # EARLY WORDPRESS.COM DETECTION (before /wp-json probe)
+        # WordPress.com returns 404 for /wp-json, so detect by domain first
+        # =====================================================================
+        
+        if domain.endswith(".wordpress.com"):
+            self.logger.log_action(
+                "wordpress_com_early_detection",
+                "domain_match",
+                domain=domain,
+                reason="Domain ends with .wordpress.com"
+            )
+            
+            # Probe WordPress.com public API to confirm
+            wpcom_result = await self._detect_wordpress_com_public_api(site_url, page_url, domain)
+            if wpcom_result:
+                return wpcom_result
+            
+            # Domain matched but API probe failed - still treat as WordPress.com
+            self.logger.log_action(
+                "wordpress_com_early_detection",
+                "domain_only_fallback",
+                domain=domain,
+                reason="Public API probe failed, using domain-based detection"
+            )
+            
+            return CMSDetectionResult(
+                cms_type=CMSType.WORDPRESS_COM,
+                rest_status=RESTStatus.AVAILABLE,
+                auth_required=AuthRequirement.OAUTH,
+                site_url=site_url,
+                confidence=0.90,
+                requires_oauth=False,  # Never required
+                oauth_optional=True,   # User can choose to connect
+                message="WordPress.com detected (domain match). Connect your account for enhanced data or use HTML fallback.",
+            )
+        
+        # =====================================================================
+        # STANDARD WORDPRESS DETECTION (self-hosted)
+        # =====================================================================
+        
         wp_json_url = urljoin(site_url, "/wp-json/")
         
         try:
             async with httpx.AsyncClient(timeout=self.timeout, follow_redirects=True) as client:
+                self.logger.log_action(
+                    "wordpress_probe",
+                    "started",
+                    endpoint="/wp-json/",
+                    url=wp_json_url
+                )
+                
                 response = await client.get(wp_json_url, headers={
                     "Accept": "application/json",
                     "User-Agent": "StructuredDataTool/1.0"
@@ -276,8 +328,118 @@ class CMSDetectionLayer:
                 message=f"Error during CMS detection: {str(e)}",
             )
     
+    async def _detect_wordpress_com_public_api(
+        self, 
+        site_url: str, 
+        page_url: str, 
+        domain: str
+    ) -> Optional[CMSDetectionResult]:
+        """
+        Probe WordPress.com public API to confirm site accessibility.
+        
+        Uses: https://public-api.wordpress.com/rest/v1.1/sites/{domain}
+        
+        This is the correct API for WordPress.com sites, NOT /wp-json.
+        """
+        public_api_url = f"https://public-api.wordpress.com/rest/v1.1/sites/{domain}"
+        
+        self.logger.log_action(
+            "wordpress_com_public_api_probe",
+            "started",
+            domain=domain,
+            api_url=public_api_url
+        )
+        
+        try:
+            async with httpx.AsyncClient(timeout=self.timeout, follow_redirects=True) as client:
+                response = await client.get(public_api_url, headers={
+                    "Accept": "application/json",
+                    "User-Agent": "StructuredDataTool/1.0"
+                })
+                
+                status_code = response.status_code
+                
+                self.logger.log_http_probe(
+                    url=page_url,
+                    endpoint=f"/rest/v1.1/sites/{domain}",
+                    status_code=status_code,
+                    result=self._status_to_result(status_code)
+                )
+                
+                if status_code == 200:
+                    try:
+                        data = response.json()
+                        site_name = data.get("name", "Unknown")
+                        is_private = data.get("is_private", False)
+                        
+                        self.logger.log_action(
+                            "wordpress_com_public_api_probe",
+                            "success",
+                            site_name=site_name,
+                            is_private=is_private,
+                            domain=domain
+                        )
+                        
+                        self.logger.log_decision(
+                            decision="wordpress_com_confirmed",
+                            reason="Public API returned valid site info",
+                            url=page_url,
+                            site_name=site_name,
+                            is_private=is_private,
+                            next_step="offer_oauth_or_html_fallback"
+                        )
+                        
+                        return CMSDetectionResult(
+                            cms_type=CMSType.WORDPRESS_COM,
+                            rest_status=RESTStatus.AVAILABLE,
+                            auth_required=AuthRequirement.OAUTH,
+                            site_url=site_url,
+                            confidence=0.95,
+                            requires_oauth=False,  # Never required
+                            oauth_optional=True,   # User can choose
+                            message=f"WordPress.com site '{site_name}' detected. Connect your account for enhanced data or use HTML fallback.",
+                        )
+                    except Exception as e:
+                        self.logger.log_error(
+                            f"Failed to parse WordPress.com API response: {e}",
+                            error_type="json_parse_error",
+                            domain=domain
+                        )
+                
+                elif status_code == 404:
+                    self.logger.log_action(
+                        "wordpress_com_public_api_probe",
+                        "site_not_found",
+                        domain=domain,
+                        status_code=status_code
+                    )
+                
+                else:
+                    self.logger.log_action(
+                        "wordpress_com_public_api_probe",
+                        "unexpected_status",
+                        domain=domain,
+                        status_code=status_code
+                    )
+                
+        except httpx.TimeoutException:
+            self.logger.log_error(
+                "Timeout while probing WordPress.com public API",
+                error_type="timeout",
+                domain=domain,
+                api_url=public_api_url
+            )
+        except Exception as e:
+            self.logger.log_error(
+                f"Error probing WordPress.com public API: {e}",
+                error_type="api_error",
+                domain=domain
+            )
+        
+        return None
+    
     async def _is_wordpress_com(self, site_url: str, client: httpx.AsyncClient) -> bool:
-        """Check if site is hosted on WordPress.com."""
+        """Check if site is hosted on WordPress.com (HTML marker check)."""
         try:
             # Check for WordPress.com specific patterns
             response = await client.get(site_url)

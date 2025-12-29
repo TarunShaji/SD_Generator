@@ -180,6 +180,11 @@ class NormalizedContent(BaseModel):
     # Delivery/shipping info (plain text)
     delivery_info: Optional[str] = None
     
+    # Article-specific fields
+    og_image: Optional[str] = None  # Open Graph image (preferred for articles)
+    word_count: int = 0  # Body text word count (for long-form detection)
+    article_signals: List[str] = Field(default_factory=list)  # Signals used for classification
+    
     # Capability flags (computed from extracted data)
     capabilities: Optional[ProductCapabilities] = None
     

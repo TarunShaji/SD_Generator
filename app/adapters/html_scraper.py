@@ -103,7 +103,14 @@ class HTMLScraper:
         # Breadcrumbs use unified JSON-LD (no re-parsing)
         breadcrumbs = self._extract_breadcrumbs_unified(soup, url, jsonld_graph)
         
-        content_type = self._detect_content_type(soup, url, headings, faq)
+        # Content type detection with article signals (pass body for word count)
+        content_type, article_signals = self._detect_content_type(soup, url, headings, faq, body)
+        
+        # Calculate word count for article detection
+        word_count = len(body.split()) if body else 0
+        
+        # Extract og:image for articles
+        og_image = self._extract_og_image(soup, url)
         
         # Calculate confidence score
         confidence = self._calculate_confidence(title, description, body, headings)
@@ -139,6 +146,10 @@ class HTMLScraper:
             product_images=script_data.get("product_images", []),
             # Delivery info from DOM extraction
             delivery_info=script_data.get("delivery_text"),
+            # Article-specific fields
+            og_image=og_image,
+            word_count=word_count,
+            article_signals=article_signals,
         )
         
         # Compute capability flags (metadata only)
@@ -389,80 +400,437 @@ class HTMLScraper:
         soup: BeautifulSoup, 
         url: str, 
         headings: List[HeadingData],
-        faq: List[FAQItem]
-    ) -> ContentType:
-        """Detect the type of content based on various signals."""
+        faq: List[FAQItem],
+        body: Optional[str] = None
+    ) -> Tuple[ContentType, List[str]]:
+        """
+        Detect the type of content based on multiple signals.
+        
+        Returns: (ContentType, list of signals used for classification)
+        
+        Article/BlogPosting Classification:
+        - Classify if ≥2 article signals are present
+        - Prefer BlogPosting for blog URLs
+        - Prefer Article for news/editorial
+        """
         url_lower = url.lower()
+        article_signals = []
         
-        # URL-based detection
-        if "/blog/" in url_lower or "/post/" in url_lower:
-            return ContentType.BLOG_POST
-        if "/service" in url_lower:
-            return ContentType.SERVICE
+        # =====================================================================
+        # SIGNAL COLLECTION (8 Article Signals)
+        # =====================================================================
+        
+        # Signal 1: <article> element exists
+        if soup.find("article"):
+            article_signals.append("article_element")
+        
+        # Signal 2: article:published_time meta
+        if soup.find("meta", property="article:published_time"):
+            article_signals.append("published_time")
+        
+        # Signal 3: article:modified_time meta
+        if soup.find("meta", property="article:modified_time"):
+            article_signals.append("modified_time")
+        
+        # Signal 4: article:author meta
+        if soup.find("meta", property="article:author"):
+            article_signals.append("article_author_meta")
+        
+        # Signal 5: Author present (name meta or visible)
+        has_author = (
+            soup.find("meta", attrs={"name": "author"}) or
+            soup.find(attrs={"rel": "author"}) or
+            soup.find(class_=re.compile(r"author|byline", re.I))
+        )
+        if has_author:
+            article_signals.append("author")
+        
+        # Signal 6: <time datetime> element
+        if soup.find("time", datetime=True):
+            article_signals.append("time_element")
+        
+        # Signal 7: URL patterns for articles/blogs
+        article_url_patterns = [
+            "/blog/", "/news/", "/article/", "/articles/", "/post/", "/posts/",
+            "/technology/", "/science/", "/opinion/", "/features/", "/story/"
+        ]
+        if any(pattern in url_lower for pattern in article_url_patterns):
+            article_signals.append("url_pattern")
+        
+        # Signal 6: Long-form content (≥300 words)
+        if body:
+            word_count = len(body.split())
+            if word_count >= 300:
+                article_signals.append("long_form_content")
+        
+        # Signal 7: Single H1 (headline pattern)
+        h1_count = len([h for h in headings if h.level == 1])
+        if h1_count == 1:
+            article_signals.append("single_h1")
+        
+        # =====================================================================
+        # PRIORITY 1: Product Detection (check first)
+        # =====================================================================
+        
         if "/product" in url_lower or "/shop/" in url_lower:
-            return ContentType.PRODUCT
-        if "/about" in url_lower:
-            return ContentType.ABOUT
-        if "/contact" in url_lower:
-            return ContentType.CONTACT
-        if "/faq" in url_lower:
-            return ContentType.FAQ
+            self._log_classification("product", "url_pattern", [])
+            return ContentType.PRODUCT, []
         
-        # Check for existing schema
+        # Check for Product schema in JSON-LD
         for script in soup.find_all("script", type="application/ld+json"):
             try:
-                import json
                 data = json.loads(script.string)
-                schema_type = data.get("@type", "").lower()
-                if "article" in schema_type or "blogposting" in schema_type:
-                    return ContentType.BLOG_POST
+                schema_type = str(data.get("@type", "")).lower()
                 if "product" in schema_type:
-                    return ContentType.PRODUCT
-                if "service" in schema_type:
-                    return ContentType.SERVICE
-                if "faqpage" in schema_type:
-                    return ContentType.FAQ
+                    self._log_classification("product", "jsonld_schema", [])
+                    return ContentType.PRODUCT, []
             except:
                 pass
         
-        # FAQ detection
+        # =====================================================================
+        # PRIORITY 2: Article/BlogPosting (≥2 signals)
+        # =====================================================================
+        
+        if len(article_signals) >= 2:
+            # Determine if BlogPosting or Article
+            is_blog = (
+                "/blog" in url_lower or 
+                "/post" in url_lower or
+                "blog" in url_lower.split("/")
+            )
+            
+            if is_blog:
+                self._log_classification("blogposting", "signal_based", article_signals)
+                return ContentType.BLOG_POST, article_signals
+            else:
+                self._log_classification("article", "signal_based", article_signals)
+                return ContentType.ARTICLE, article_signals
+        
+        # =====================================================================
+        # PRIORITY 3: Existing JSON-LD Schema Type
+        # =====================================================================
+        
+        for script in soup.find_all("script", type="application/ld+json"):
+            try:
+                data = json.loads(script.string)
+                schema_type = str(data.get("@type", "")).lower()
+                if "article" in schema_type or "blogposting" in schema_type:
+                    self._log_classification("article", "jsonld_schema", ["jsonld_type"])
+                    return ContentType.ARTICLE, ["jsonld_type"]
+                if "service" in schema_type:
+                    return ContentType.SERVICE, []
+                if "faqpage" in schema_type:
+                    return ContentType.FAQ, []
+            except:
+                pass
+        
+        # =====================================================================
+        # PRIORITY 4: URL-Based Detection (Other Types)
+        # =====================================================================
+        
+        if "/service" in url_lower:
+            self._log_classification("service", "url_pattern", [])
+            return ContentType.SERVICE, []
+        if "/about" in url_lower:
+            return ContentType.ABOUT, []
+        if "/contact" in url_lower:
+            return ContentType.CONTACT, []
+        if "/faq" in url_lower:
+            return ContentType.FAQ, []
+        
+        # =====================================================================
+        # PRIORITY 5: FAQ Detection (3+ Q&A pairs)
+        # =====================================================================
+        
         if len(faq) >= 3:
-            return ContentType.FAQ
+            return ContentType.FAQ, []
         
-        # Article detection (has date, author-like meta)
-        if soup.find("meta", property="article:published_time"):
-            return ContentType.ARTICLE
+        # =====================================================================
+        # PRIORITY 6: Single Article Signal (still classify as article)
+        # =====================================================================
         
-        # Home page detection
+        if len(article_signals) == 1:
+            # Single signal: still classify as article but log
+            self._log_classification("article", "single_signal", article_signals)
+            return ContentType.ARTICLE, article_signals
+        
+        # =====================================================================
+        # PRIORITY 7: Home Page Detection
+        # =====================================================================
+        
         parsed = urlparse(url)
         if parsed.path in ["", "/", "/index.html", "/index.php"]:
-            return ContentType.HOME
+            return ContentType.HOME, []
         
-        return ContentType.UNKNOWN
+        # =====================================================================
+        # FALLBACK: Unknown
+        # =====================================================================
+        
+        self._log_classification("unknown", "no_signals", article_signals)
+        return ContentType.UNKNOWN, article_signals
+    
+    def _log_classification(self, decision: str, reason: str, signals: List[str]):
+        """Log article classification decision."""
+        self.logger.log_action(
+            "article_classification",
+            "decision",
+            content_type=decision,
+            reason=reason,
+            signals_used=signals,
+            signal_count=len(signals)
+        )
     
     def _extract_author(self, soup: BeautifulSoup) -> Optional[str]:
-        """Extract author name."""
-        # Try meta tag
+        """
+        Extract author name using strict, deterministic rules.
+        
+        PRIORITY ORDER (do NOT merge sources):
+        1. JSON-LD author (highest trust)
+        2. Semantic HTML author markup
+        3. Author page links
+        
+        RULES:
+        - Missing author is acceptable
+        - Incorrect author is NOT acceptable
+        - Never guess or infer
+        
+        Returns: Clean author name or None
+        """
+        # =====================================================================
+        # PRIORITY 1: JSON-LD Author (Highest Trust - DO NOT OVERRIDE)
+        # =====================================================================
+        for script in soup.find_all("script", type="application/ld+json"):
+            try:
+                data = json.loads(script.string)
+                author = self._extract_jsonld_author(data)
+                if author:
+                    clean = self._sanitize_author_name(author)
+                    if clean:
+                        self.logger.log_action(
+                            "author_extraction", "success",
+                            source="jsonld", raw=author[:50], clean=clean
+                        )
+                        return clean
+            except:
+                pass
+        
+        # =====================================================================
+        # PRIORITY 2: Semantic HTML Author Markup
+        # =====================================================================
+        
+        # 2a: <meta name="author">
         author_meta = soup.find("meta", attrs={"name": "author"})
         if author_meta and author_meta.get("content"):
-            return author_meta["content"].strip()
+            clean = self._sanitize_author_name(author_meta["content"])
+            if clean:
+                self.logger.log_action(
+                    "author_extraction", "success",
+                    source="meta_name_author", clean=clean
+                )
+                return clean
         
-        # Try rel="author"
-        author_link = soup.find("a", rel="author")
-        if author_link:
-            return author_link.get_text(strip=True)
+        # 2b: [itemprop="author"]
+        itemprop_author = soup.find(attrs={"itemprop": "author"})
+        if itemprop_author:
+            # Try to get name from nested element or text
+            name_elem = itemprop_author.find(attrs={"itemprop": "name"})
+            if name_elem:
+                text = name_elem.get_text(strip=True)
+            else:
+                text = itemprop_author.get_text(strip=True)
+            clean = self._sanitize_author_name(text)
+            if clean:
+                self.logger.log_action(
+                    "author_extraction", "success",
+                    source="itemprop_author", clean=clean
+                )
+                return clean
         
-        # Try common class names
-        for cls in ["author", "byline", "post-author"]:
-            author_elem = soup.find(class_=re.compile(cls, re.I))
-            if author_elem:
-                text = author_elem.get_text(strip=True)
-                # Clean up "By Author Name" format
-                text = re.sub(r'^by\s+', '', text, flags=re.I)
-                if text:
-                    return text
+        # 2c: [rel="author"]
+        rel_author = soup.find(attrs={"rel": "author"})
+        if rel_author:
+            text = rel_author.get_text(strip=True)
+            clean = self._sanitize_author_name(text)
+            if clean:
+                self.logger.log_action(
+                    "author_extraction", "success",
+                    source="rel_author", clean=clean
+                )
+                return clean
+        
+        # 2d: <address> containing a name (semantic HTML5)
+        address = soup.find("address")
+        if address:
+            # Look for a link or plain text
+            link = address.find("a")
+            if link:
+                text = link.get_text(strip=True)
+            else:
+                text = address.get_text(strip=True)
+            clean = self._sanitize_author_name(text)
+            if clean:
+                self.logger.log_action(
+                    "author_extraction", "success",
+                    source="address_element", clean=clean
+                )
+                return clean
+        
+        # 2e: Specific author class patterns (exact match only)
+        author_classes = [
+            "author-name", "post-author-name", "byline-name",
+            "article-author-name", "entry-author-name", "author__name"
+        ]
+        for cls in author_classes:
+            elem = soup.find(class_=re.compile(f"^{cls}$", re.I))
+            if elem:
+                text = elem.get_text(strip=True)
+                clean = self._sanitize_author_name(text)
+                if clean:
+                    self.logger.log_action(
+                        "author_extraction", "success",
+                        source=f"class_{cls}", clean=clean
+                    )
+                    return clean
+        
+        # =====================================================================
+        # PRIORITY 3: Author Page Links
+        # =====================================================================
+        
+        # Look for links to /author/ or /writers/ pages on same domain
+        for link in soup.find_all("a", href=True):
+            href = link.get("href", "")
+            if "/author/" in href or "/writers/" in href:
+                text = link.get_text(strip=True)
+                clean = self._sanitize_author_name(text)
+                if clean:
+                    self.logger.log_action(
+                        "author_extraction", "success",
+                        source="author_page_link", clean=clean
+                    )
+                    return clean
+        
+        # =====================================================================
+        # NO VALID AUTHOR FOUND - This is acceptable
+        # =====================================================================
+        self.logger.log_action(
+            "author_extraction", "omitted",
+            reason="no_valid_author_signal"
+        )
+        return None
+    
+    def _extract_jsonld_author(self, data: dict) -> Optional[str]:
+        """Extract author from JSON-LD structure."""
+        if not isinstance(data, dict):
+            return None
+        
+        # Direct author field
+        author = data.get("author")
+        if author:
+            if isinstance(author, dict) and author.get("name"):
+                return author["name"].strip()
+            elif isinstance(author, str):
+                return author.strip()
+            elif isinstance(author, list) and author:
+                first = author[0]
+                if isinstance(first, dict) and first.get("name"):
+                    return first["name"].strip()
+                elif isinstance(first, str):
+                    return first.strip()
+        
+        # Check @graph
+        if "@graph" in data:
+            for item in data["@graph"]:
+                if isinstance(item, dict):
+                    item_type = item.get("@type", "")
+                    # Look for Article/BlogPosting with author
+                    if item_type in ["Article", "BlogPosting", "NewsArticle"]:
+                        author = item.get("author")
+                        if isinstance(author, dict) and author.get("name"):
+                            return author["name"].strip()
+                        elif isinstance(author, str):
+                            return author.strip()
         
         return None
+    
+    def _sanitize_author_name(self, raw: str) -> Optional[str]:
+        """
+        Sanitize and validate author name.
+        
+        STRICT RULES:
+        - Must be ≤80 characters
+        - No newlines
+        - No URLs
+        - No dates
+        - No verbs (written, posted, published)
+        - No social/share text
+        
+        Returns: Clean name or None if invalid
+        """
+        if not raw:
+            return None
+        
+        # Remove "By " prefix
+        clean = re.sub(r'^by\s+', '', raw, flags=re.I)
+        
+        # Remove newlines and normalize whitespace
+        clean = re.sub(r'\s+', ' ', clean).strip()
+        
+        # Check length (≤80 chars per spec)
+        if len(clean) > 80:
+            return None
+        
+        # Reject if too short (single char)
+        if len(clean) < 2:
+            return None
+        
+        # Reject if contains URLs
+        if re.search(r'https?://', clean, re.I):
+            return None
+        
+        # Reject if contains email
+        if '@' in clean and '.' in clean:
+            return None
+        
+        lower = clean.lower()
+        
+        # Reject if contains verbs (indicates sentence, not name)
+        verbs = ['written', 'posted', 'published', 'updated', 'edited', 'reviewed', 'contributed']
+        if any(verb in lower for verb in verbs):
+            return None
+        
+        # Reject if contains social/share/UI junk
+        ui_junk = [
+            'share', 'follow', 'subscribe', 'comment', 'read more',
+            'click', 'twitter', 'facebook', 'linkedin', 'instagram',
+            'min read', 'comments', 'likes', 'views'
+        ]
+        if any(junk in lower for junk in ui_junk):
+            return None
+        
+        # Reject if contains date patterns
+        if re.search(r'\b\d{4}\b|\b\d{1,2}/\d{1,2}\b', lower):
+            return None
+        
+        # Reject month names (indicates date, not name)
+        months = ['january', 'february', 'march', 'april', 'may', 'june', 
+                  'july', 'august', 'september', 'october', 'november', 'december',
+                  'jan', 'feb', 'mar', 'apr', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec']
+        if any(month in lower for month in months):
+            return None
+        
+        # Reject if too many punctuation marks
+        if len(re.findall(r'[.,;:!?(){}[\]|·]', clean)) > 2:
+            return None
+        
+        # Reject if looks like a paragraph
+        if clean.count('.') > 1 and len(clean) > 40:
+            return None
+        
+        # Reject if just numbers or mostly numbers
+        if re.match(r'^[\d\s]+$', clean):
+            return None
+        
+        return clean
     
     def _extract_date(self, soup: BeautifulSoup, date_type: str) -> Optional[str]:
         """Extract published or modified date."""
@@ -490,19 +858,140 @@ class HTMLScraper:
         
         return None
     
+    def _extract_og_image(self, soup: BeautifulSoup, base_url: str) -> Optional[str]:
+        """
+        Extract Open Graph image.
+        
+        Priority:
+        1. og:image meta tag (preferred for articles)
+        2. twitter:image meta tag
+        3. First large image in content
+        """
+        # Try og:image first
+        og_image = soup.find("meta", property="og:image")
+        if og_image and og_image.get("content"):
+            img_url = og_image["content"]
+            # Ensure absolute URL
+            if not img_url.startswith("http"):
+                img_url = urljoin(base_url, img_url)
+            return img_url
+        
+        # Try twitter:image
+        twitter_image = soup.find("meta", attrs={"name": "twitter:image"})
+        if twitter_image and twitter_image.get("content"):
+            img_url = twitter_image["content"]
+            if not img_url.startswith("http"):
+                img_url = urljoin(base_url, img_url)
+            return img_url
+        
+        return None
+    
     def _extract_logo(self, soup: BeautifulSoup, base_url: str) -> Optional[str]:
-        """Extract organization logo."""
-        # Look for logo in header
+        """
+        Extract organization logo.
+        
+        Priority:
+        1. JSON-LD logo (most reliable for publishers)
+        2. Header logo image
+        3. Site logo image
+        4. Apple touch icon (high quality)
+        5. Favicon (last resort)
+        
+        ❌ Do NOT reuse article hero image as logo
+        """
+        # Priority 1: JSON-LD publisher logo
+        for script in soup.find_all("script", type="application/ld+json"):
+            try:
+                data = json.loads(script.string)
+                
+                # Direct publisher logo
+                publisher = data.get("publisher")
+                if isinstance(publisher, dict):
+                    logo = publisher.get("logo")
+                    if isinstance(logo, dict) and logo.get("url"):
+                        logo_url = logo["url"]
+                        if not logo_url.startswith("http"):
+                            logo_url = urljoin(base_url, logo_url)
+                        return logo_url
+                    elif isinstance(logo, str):
+                        if not logo.startswith("http"):
+                            logo = urljoin(base_url, logo)
+                        return logo
+                
+                # @graph publisher logo
+                if "@graph" in data:
+                    for item in data["@graph"]:
+                        if isinstance(item, dict):
+                            if item.get("@type") == "Organization":
+                                logo = item.get("logo")
+                                if isinstance(logo, dict) and logo.get("url"):
+                                    logo_url = logo["url"]
+                                    if not logo_url.startswith("http"):
+                                        logo_url = urljoin(base_url, logo_url)
+                                    return logo_url
+                                elif isinstance(logo, str):
+                                    if not logo.startswith("http"):
+                                        logo = urljoin(base_url, logo)
+                                    return logo
+            except:
+                pass
+        
+        # Priority 2: Header logo image
         header = soup.find("header")
         if header:
+            # Look for img with logo class
             logo = header.find("img", class_=re.compile(r"logo", re.I))
             if logo and logo.get("src"):
                 return urljoin(base_url, logo["src"])
+            # Look for any img that might be a logo (first image in header, likely logo)
+            first_img = header.find("img")
+            if first_img and first_img.get("src"):
+                src = first_img.get("src")
+                # Only use if it looks like a logo path
+                if "logo" in src.lower() or "brand" in src.lower():
+                    return urljoin(base_url, src)
         
-        # Try to find any logo image
+        # Priority 3: Site logo anywhere in page
+        logo = soup.find("img", class_=re.compile(r"^(site-logo|brand-logo|company-logo)$", re.I))
+        if logo and logo.get("src"):
+            return urljoin(base_url, logo["src"])
+        
+        # Any logo class
         logo = soup.find("img", class_=re.compile(r"logo", re.I))
         if logo and logo.get("src"):
             return urljoin(base_url, logo["src"])
+        
+        # Priority 4: Apple touch icon (high quality, good fallback)
+        apple_icon = soup.find("link", rel="apple-touch-icon")
+        if apple_icon and apple_icon.get("href"):
+            return urljoin(base_url, apple_icon["href"])
+        
+        # Apple touch icon with sizes
+        apple_icons = soup.find_all("link", rel=re.compile(r"apple-touch-icon"))
+        if apple_icons:
+            # Prefer largest size
+            best = None
+            best_size = 0
+            for icon in apple_icons:
+                href = icon.get("href")
+                sizes = icon.get("sizes", "0x0")
+                try:
+                    size = int(sizes.split("x")[0])
+                except:
+                    size = 0
+                if href and size > best_size:
+                    best = href
+                    best_size = size
+            if best:
+                return urljoin(base_url, best)
+        
+        # Priority 5: Favicon (last resort, may be small)
+        favicon = soup.find("link", rel="icon")
+        if favicon and favicon.get("href"):
+            href = favicon["href"]
+            # Skip SVG and very small icons
+            if ".svg" not in href.lower() and ".ico" not in href.lower():
+                return urljoin(base_url, href)
         
         return None
     

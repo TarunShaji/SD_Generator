@@ -96,6 +96,7 @@ class ArticleSchema(SchemaBase):
     description: Optional[str] = None
     image: Optional[Union[str, List[str]]] = None
     author: Optional[PersonSchema] = None
+    publisher: Optional[Dict[str, Any]] = None  # Organization with logo
     datePublished: Optional[str] = None
     dateModified: Optional[str] = None
     mainEntityOfPage: Optional[str] = None

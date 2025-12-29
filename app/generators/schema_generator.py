@@ -2,6 +2,8 @@
 Schema Generator for the Structured Data Automation Tool.
 Generates deterministic schema.org JSON-LD from normalized content.
 """
+import re
+from datetime import datetime, timezone
 from typing import List, Dict, Any, Optional
 
 from app.models.content import NormalizedContent, ContentType
@@ -24,6 +26,91 @@ from app.models.schema import (
     AggregateRatingSchema,
 )
 from app.utils.logger import LayerLogger
+
+
+def normalize_date(date_str: Optional[str]) -> Optional[str]:
+    """
+    Normalize date to Google-preferred ISO-8601 format.
+    
+    Guarantees output: YYYY-MM-DDTHH:MM:SSZ
+    
+    Cases:
+    - Full ISO with TZ: Keep unchanged
+    - ISO without TZ: Append Z
+    - Date only (YYYY-MM-DD): Append T00:00:00Z
+    - Unix timestamp: Convert to UTC datetime
+    - Invalid/None: Return None
+    
+    ❌ Never infers timezone
+    ❌ Never guesses time
+    ❌ Never uses system time
+    """
+    if not date_str:
+        return None
+    
+    date_str = str(date_str).strip()
+    
+    if not date_str:
+        return None
+    
+    # Case D: Unix timestamp (seconds or milliseconds)
+    if date_str.isdigit():
+        try:
+            ts = int(date_str)
+            # Milliseconds → seconds
+            if ts > 10000000000:
+                ts = ts // 1000
+            dt = datetime.fromtimestamp(ts, tz=timezone.utc)
+            return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+        except:
+            return None
+    
+    # Case A: Full ISO with timezone (has + or - after T, or ends with Z)
+    # Patterns: 2025-12-28T01:00:00Z, 2025-12-28T01:00:00+00:00, 2025-12-28T01:00:00-05:00
+    if 'T' in date_str:
+        if date_str.endswith('Z'):
+            # Already in correct format
+            return date_str
+        
+        # Check for timezone offset after T
+        if re.search(r'T\d{2}:\d{2}:\d{2}[+-]\d{2}:\d{2}$', date_str):
+            # Has timezone offset, keep unchanged
+            return date_str
+        
+        if re.search(r'T\d{2}:\d{2}:\d{2}[+-]\d{4}$', date_str):
+            # Has timezone offset without colon (e.g., +0000)
+            return date_str
+        
+        # Case B: ISO without timezone → append Z
+        if re.match(r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$', date_str):
+            return date_str + 'Z'
+        
+        # Handle variations like T00:00:00.000
+        if re.match(r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+$', date_str):
+            # Strip milliseconds and add Z
+            base = re.sub(r'\.\d+$', '', date_str)
+            return base + 'Z'
+        
+        # Already has some timezone info, return as is
+        return date_str
+    
+    # Case C: Date only (YYYY-MM-DD)
+    if re.match(r'^\d{4}-\d{2}-\d{2}$', date_str):
+        return date_str + 'T00:00:00Z'
+    
+    # Unknown format - try to parse and normalize
+    try:
+        # Attempt ISO parse
+        dt = datetime.fromisoformat(date_str.replace('Z', '+00:00'))
+        return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+    except:
+        pass
+    
+    # Last resort: return as-is if somewhat valid
+    if re.match(r'^\d{4}-\d{2}-\d{2}', date_str):
+        return date_str
+    
+    return None
 
 
 class SchemaGenerator:
@@ -120,28 +207,149 @@ class SchemaGenerator:
             return self._generate_webpage(content)
     
     def _generate_article(self, content: NormalizedContent) -> Dict[str, Any]:
-        """Generate Article schema."""
+        """
+        Generate Article schema with Google Rich Results required fields.
+        
+        Required fields:
+        - headline (≤110 chars)
+        - mainEntityOfPage (canonical URL)
+        - author (Person)
+        - datePublished
+        - image (array format)
+        - publisher (Organization with logo)
+        """
+        field_decisions = []
+        
+        # Headline (required, ≤110 chars)
+        headline = self._truncate(content.title, 110)
+        field_decisions.append({"field": "headline", "included": True, "value": headline})
+        
+        # Image - prefer og:image for articles, always array format
+        image = None
+        if content.og_image:
+            image = [content.og_image]
+            field_decisions.append({"field": "image", "included": True, "source": "og_image"})
+        elif content.images:
+            image = [content.images[0].src]
+            field_decisions.append({"field": "image", "included": True, "source": "dom_first_image"})
+        else:
+            field_decisions.append({"field": "image", "included": False, "reason": "no_image_found"})
+        
+        # Author
+        author = None
+        if content.author:
+            author = PersonSchema(name=content.author)
+            field_decisions.append({"field": "author", "included": True, "value": content.author})
+        else:
+            field_decisions.append({"field": "author", "included": False, "reason": "no_author_found"})
+        
+        # Publisher (Organization with logo)
+        # Per Google: publisher MUST include logo, so omit publisher if no logo
+        publisher = None
+        if content.organization_name and content.organization_logo:
+            publisher = {
+                "@type": "Organization",
+                "name": content.organization_name,
+                "logo": {
+                    "@type": "ImageObject",
+                    "url": content.organization_logo
+                }
+            }
+            field_decisions.append({"field": "publisher", "included": True, "name": content.organization_name})
+            field_decisions.append({"field": "publisher.logo", "included": True})
+        elif content.organization_name:
+            # Has name but no logo - omit publisher entirely
+            field_decisions.append({"field": "publisher", "included": False, "reason": "logo_required_but_missing"})
+        else:
+            field_decisions.append({"field": "publisher", "included": False, "reason": "no_organization_name"})
+        
+        # Dates
+        if content.published_date:
+            field_decisions.append({"field": "datePublished", "included": True})
+        else:
+            field_decisions.append({"field": "datePublished", "included": False, "reason": "not_found"})
+        
+        if content.modified_date:
+            field_decisions.append({"field": "dateModified", "included": True})
+        
+        # Log field decisions
+        self.logger.log_action(
+            "article_schema_fields",
+            "decisions",
+            included=[d["field"] for d in field_decisions if d.get("included")],
+            missing=[d["field"] for d in field_decisions if not d.get("included")],
+            article_signals=content.article_signals
+        )
+        
         schema = ArticleSchema(
-            headline=self._truncate(content.title, 110),
+            headline=headline,
             description=self._truncate(content.description, 300) if content.description else None,
-            image=self._get_primary_image(content),
-            author=PersonSchema(name=content.author) if content.author else None,
-            datePublished=content.published_date,
-            dateModified=content.modified_date,
+            image=image,
+            author=author,
+            publisher=publisher,
+            datePublished=normalize_date(content.published_date),
+            dateModified=normalize_date(content.modified_date),
             mainEntityOfPage=content.url,
         )
         
         return schema.to_jsonld()
     
     def _generate_blog_posting(self, content: NormalizedContent) -> Dict[str, Any]:
-        """Generate BlogPosting schema."""
+        """
+        Generate BlogPosting schema with Google Rich Results required fields.
+        
+        Uses same logic as Article but with BlogPosting type.
+        """
+        field_decisions = []
+        
+        # Headline
+        headline = self._truncate(content.title, 110)
+        
+        # Image - array format
+        image = None
+        if content.og_image:
+            image = [content.og_image]
+        elif content.images:
+            image = [content.images[0].src]
+        
+        # Author
+        author = PersonSchema(name=content.author) if content.author else None
+        
+        # Publisher - must have both name AND logo (per Google requirements)
+        publisher = None
+        if content.organization_name and content.organization_logo:
+            publisher = {
+                "@type": "Organization",
+                "name": content.organization_name,
+                "logo": {
+                    "@type": "ImageObject",
+                    "url": content.organization_logo
+                }
+            }
+        
+        # Log field decisions
+        self.logger.log_action(
+            "blogposting_schema_fields",
+            "decisions",
+            included=["headline", "mainEntityOfPage"] + 
+                     (["image"] if image else []) +
+                     (["author"] if author else []) +
+                     (["publisher"] if publisher else []) +
+                     (["datePublished"] if content.published_date else []),
+            missing=([] if image else ["image"]) +
+                    ([] if author else ["author"]) +
+                    ([] if publisher else ["publisher"]),
+            article_signals=content.article_signals
+        )
+        
         schema = BlogPostingSchema(
-            headline=self._truncate(content.title, 110),
+            headline=headline,
             description=self._truncate(content.description, 300) if content.description else None,
-            image=self._get_primary_image(content),
-            author=PersonSchema(name=content.author) if content.author else None,
-            datePublished=content.published_date,
-            dateModified=content.modified_date,
+            image=image,
+            author=author,
+            publisher=publisher,
+            datePublished=normalize_date(content.published_date),
+            dateModified=normalize_date(content.modified_date),
             mainEntityOfPage=content.url,
         )
         

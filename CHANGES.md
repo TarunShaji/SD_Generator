@@ -275,7 +275,82 @@ if cms_result.cms_type == CMSType.WORDPRESS_COM:
 
 ---
 
+## Article Classification & Schema Fix (2025-12-29)
+
+### 🏗️ Problem
+
+Editorial pages were being under-classified as `WebPage` instead of `Article/BlogPosting`, missing Google Rich Results eligibility.
+
+### ✅ Solution
+
+Implemented signal-based classification and enhanced Article/BlogPosting schemas.
+
+---
+
+### 1. Signal-Based Classification (`html_scraper.py`)
+
+**7 Article Signals:**
+
+| Signal | Detection |
+|--------|-----------|
+| `published_time` | `<meta property="article:published_time">` |
+| `modified_time` | `<meta property="article:modified_time">` |
+| `author` | `<meta name="author">` or byline |
+| `time_element` | `<time datetime>` |
+| `url_pattern` | `/blog/`, `/news/`, `/articles/`, `/posts/` |
+| `long_form_content` | ≥300 words |
+| `single_h1` | Exactly one H1 |
+
+**Decision:** ≥2 signals → Article (or BlogPosting for blog URLs)
+
+---
+
+### 2. Enhanced Article Schema (`schema_generator.py`)
+
+| Field | Status | Source |
+|-------|--------|--------|
+| `headline` | ✅ Required | title (≤110 chars) |
+| `mainEntityOfPage` | ✅ Required | canonical URL |
+| `author` | ✅ Required | Person schema |
+| `datePublished` | ✅ Required | article:published_time |
+| `image` | ✅ Required | og:image (array format) |
+| `publisher` | ✅ Required | Organization with logo |
+| `dateModified` | Optional | article:modified_time |
+
+---
+
+### 3. New Fields in NormalizedContent
+
+```python
+og_image: Optional[str]        # Open Graph image
+word_count: int                 # For long-form detection
+article_signals: List[str]      # Signals used for classification
+```
+
+---
+
+### Logging
+
+```json
+{"event": "article_classification", "content_type": "blogposting", "signals_used": ["author", "published_time", "url_pattern"]}
+{"event": "article_schema_fields", "included": ["headline", "author", "image", "publisher"], "missing": ["publisher.logo"]}
+```
+
+---
+
+### Files Changed
+
+| File | Changes |
+|------|---------|
+| `app/models/content.py` | Added og_image, word_count, article_signals |
+| `app/adapters/html_scraper.py` | Signal-based classifier, _extract_og_image |
+| `app/models/schema.py` | Added publisher to ArticleSchema |
+| `app/generators/schema_generator.py` | Enhanced Article/BlogPosting with publisher |
+
+---
+
 ## Previous Changes
 
 See git history for earlier changes.
+
 

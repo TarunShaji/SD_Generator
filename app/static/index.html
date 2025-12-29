@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description"
+        content="SEO tool that automatically generates schema.org JSON-LD structured data for web pages">
+    <title>Structured Data Generator | SEO Schema Tool</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link
+        href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap"
+        rel="stylesheet">
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+
+<body>
+    <div class="app-container">
+        <!-- Header -->
+        <header class="header">
+            <div class="logo">
+                <span class="logo-icon">⚡</span>
+                <h1>Schema Generator</h1>
+            </div>
+            <p class="tagline">Transform your pages into rich results with schema.org JSON-LD</p>
+        </header>
+
+        <!-- Mode Selection -->
+        <section class="mode-selection">
+            <h2>Choose Generation Mode</h2>
+            <div class="mode-cards">
+                <!-- Mode A: CMS-Based -->
+                <div class="mode-card" id="mode-cms" data-mode="cms">
+                    <div class="mode-badge recommended">Recommended</div>
+                    <div class="mode-icon">🏢</div>
+                    <h3>CMS-Based</h3>
+                    <p>For users with CMS access. Highest accuracy using REST APIs.</p>
+                    <ul class="mode-features">
+                        <li>✓ WordPress REST API</li>
+                        <li>✓ Shopify integration</li>
+                        <li>✓ Rich metadata extraction</li>
+                    </ul>
+                </div>
+
+                <!-- Mode B: HTML-Only -->
+                <div class="mode-card" id="mode-html" data-mode="html">
+                    <div class="mode-badge">Quick</div>
+                    <div class="mode-icon">📄</div>
+                    <h3>HTML-Only</h3>
+                    <p>No CMS access needed. Direct page scraping.</p>
+                    <ul class="mode-features">
+                        <li>✓ No credentials required</li>
+                        <li>✓ Works with any website</li>
+                        <li>✓ Fast processing</li>
+                    </ul>
+                </div>
+            </div>
+        </section>
+
+        <!-- Form Section -->
+        <section class="form-section hidden" id="form-section">
+            <div class="form-header">
+                <button class="back-btn" id="back-btn">← Back to Mode Selection</button>
+                <h2 id="form-title">Generate Structured Data</h2>
+            </div>
+
+            <form id="generate-form">
+                <!-- CMS Selection (only for CMS mode) -->
+                <div class="form-group" id="cms-select-group">
+                    <label for="cms-select">Select CMS Platform</label>
+                    <select id="cms-select" name="cms_type">
+                        <option value="auto">Auto-detect</option>
+                        <option value="wordpress">WordPress</option>
+                        <option value="shopify">Shopify</option>
+                    </select>
+                </div>
+
+                <!-- URL Input -->
+                <div class="form-group">
+                    <label for="url-input">Page URL</label>
+                    <input type="url" id="url-input" name="url" placeholder="https://example.com/page" required>
+                </div>
+
+                <!-- Disclaimer -->
+                <div class="disclaimer" id="disclaimer">
+                    <span class="disclaimer-icon">ℹ️</span>
+                    <p id="disclaimer-text"></p>
+                </div>
+
+                <!-- Submit Button -->
+                <button type="submit" class="submit-btn" id="submit-btn">
+                    <span class="btn-text">Generate Schema</span>
+                    <span class="btn-loader hidden">
+                        <span class="loader"></span>
+                        Processing...
+                    </span>
+                </button>
+            </form>
+        </section>
+
+        <!-- Results Section -->
+        <section class="results-section hidden" id="results-section">
+            <div class="results-header">
+                <h2>Generated Schema</h2>
+                <div class="results-meta" id="results-meta"></div>
+            </div>
+
+            <!-- Schema Types -->
+            <div class="schema-types" id="schema-types"></div>
+
+            <!-- JSON-LD Output -->
+            <div class="output-container">
+                <div class="output-header">
+                    <h3>JSON-LD Output</h3>
+                    <button class="copy-btn" id="copy-btn">
+                        <span class="copy-icon">📋</span>
+                        Copy to Clipboard
+                    </button>
+                </div>
+                <pre class="output-code"><code id="output-json"></code></pre>
+            </div>
+
+            <!-- Script Tag -->
+            <div class="output-container">
+                <div class="output-header">
+                    <h3>Ready-to-Use Script Tag</h3>
+                    <button class="copy-btn" id="copy-script-btn">
+                        <span class="copy-icon">📋</span>
+                        Copy Script Tag
+                    </button>
+                </div>
+                <pre class="output-code"><code id="output-script"></code></pre>
+            </div>
+
+            <!-- Debug Info -->
+            <details class="debug-section">
+                <summary>🔧 Debug Information</summary>
+                <div class="debug-content" id="debug-content"></div>
+            </details>
+
+            <!-- New Generation Button -->
+            <button class="new-btn" id="new-btn">Generate Another</button>
+        </section>
+
+        <!-- Error Section -->
+        <section class="error-section hidden" id="error-section">
+            <div class="error-icon">⚠️</div>
+            <h2>Error</h2>
+            <p id="error-message"></p>
+            <button class="retry-btn" id="retry-btn">Try Again</button>
+        </section>
+
+        <!-- Footer -->
+        <footer class="footer">
+            <p>Structured Data Automation Tool v1.0</p>
+            <p class="footer-note">REST-first • CMS-aware • Deterministic</p>
+        </footer>
+    </div>
+
+    <script src="/static/app.js"></script>
+</body>
+
+</html>

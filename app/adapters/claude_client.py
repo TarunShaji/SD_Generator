@@ -190,6 +190,229 @@ Author:"""
             self.logger.log_error(f"Claude API error: {str(e)}", error_type="api_error")
             return None
     
+    # =========================================================================
+    # NEW AI ENHANCEMENTS
+    # =========================================================================
+    
+    # Allowed content types for page classification
+    ALLOWED_CONTENT_TYPES = [
+        "article", "blog_post", "news_article",
+        "product", "service",
+        "recipe", "how_to",
+        "faq", "event", "video",
+        "local_business", "about", "contact",
+        "home", "collection", "webpage"
+    ]
+    
+    async def classify_content_type(self, body_text: str, url: str = "") -> Optional[str]:
+        """Classify page content type using AI. VALIDATED against enum."""
+        if not self.client or not body_text or len(body_text) < 100:
+            return None
+        
+        try:
+            self.logger.log_action("classify_content_type", "started", url=url[:50] if url else None)
+            
+            response = self.client.messages.create(
+                model=self.MODEL_FAST,
+                max_tokens=20,
+                temperature=0,
+                system=SYSTEM_PROMPT,
+                messages=[{
+                    "role": "user",
+                    "content": f"""Classify this web page. Return ONLY the type name. No explanation.
+
+TYPES:
+article - blog, opinion, guide, tutorial
+news_article - journalism, press release, news
+product - e-commerce with price/buy button
+service - business/professional offering
+recipe - cooking instructions with ingredients
+how_to - step-by-step instructions
+faq - Q&A pairs
+event - scheduled event with date/location
+video - primarily video content
+local_business - physical business location
+about - company/brand info
+contact - contact page
+home - homepage
+collection - listing/category page
+webpage - fallback
+
+URL: {url[:80] if url else ''}
+Content: {body_text[:1200]}
+
+Type:"""
+                }]
+            )
+            
+            result = response.content[0].text.strip().split('\n')[0].lower()
+            
+            if result in self.ALLOWED_CONTENT_TYPES:
+                self.logger.log_action("classify_content_type", "success", 
+                    content_type=result, tokens=response.usage.input_tokens + response.usage.output_tokens)
+                return result
+            else:
+                self.logger.log_action("classify_content_type", "rejected", reason="not_in_list", output=result)
+                return None
+                
+        except Exception as e:
+            self.logger.log_error(f"Claude API error: {str(e)}", error_type="api_error")
+            return None
+    
+    async def extract_published_date(self, body_text: str) -> Optional[str]:
+        """Extract published date from body. Returns ISO format YYYY-MM-DD."""
+        if not self.client or not body_text or len(body_text) < 100:
+            return None
+        
+        try:
+            self.logger.log_action("extract_date", "started")
+            
+            response = self.client.messages.create(
+                model=self.MODEL_FAST,
+                max_tokens=30,
+                temperature=0,
+                system=SYSTEM_PROMPT,
+                messages=[{
+                    "role": "user",
+                    "content": f"""Find the publication date. Return ONLY in format: YYYY-MM-DD
+If no date found, return UNKNOWN.
+
+Text: {body_text[:1200]}
+
+Date:"""
+                }]
+            )
+            
+            result = response.content[0].text.strip()
+            import re
+            if result != "UNKNOWN" and re.match(r'^\d{4}-\d{2}-\d{2}', result):
+                self.logger.log_action("extract_date", "success", date=result)
+                return result
+            else:
+                self.logger.log_action("extract_date", "rejected", output=result)
+                return None
+                
+        except Exception as e:
+            self.logger.log_error(f"Claude API error: {str(e)}", error_type="api_error")
+            return None
+    
+    async def extract_publisher(self, body_text: str, url: str = "") -> Optional[str]:
+        """Extract publisher/organization. VALIDATED: must exist in text or URL."""
+        if not self.client or not body_text or len(body_text) < 100:
+            return None
+        
+        try:
+            self.logger.log_action("extract_publisher", "started")
+            
+            response = self.client.messages.create(
+                model=self.MODEL_FAST,
+                max_tokens=50,
+                temperature=0,
+                system=SYSTEM_PROMPT,
+                messages=[{
+                    "role": "user",
+                    "content": f"""Find the publisher or organization name. Return ONLY the name.
+If not found, return UNKNOWN.
+
+URL: {url[:100] if url else ''}
+Text: {body_text[:800]}
+
+Publisher:"""
+                }]
+            )
+            
+            result = response.content[0].text.strip()
+            combined = (body_text + " " + url).lower()
+            if result != "UNKNOWN" and result.lower() in combined:
+                self.logger.log_action("extract_publisher", "success", publisher=result)
+                return result
+            else:
+                self.logger.log_action("extract_publisher", "rejected", output=result)
+                return None
+                
+        except Exception as e:
+            self.logger.log_error(f"Claude API error: {str(e)}", error_type="api_error")
+            return None
+    
+    async def extract_keywords(self, body_text: str, max_keywords: int = 5) -> Optional[list]:
+        """Extract top keywords from content. VALIDATED: must exist in text."""
+        if not self.client or not body_text or len(body_text) < 100:
+            return None
+        
+        try:
+            self.logger.log_action("extract_keywords", "started")
+            
+            response = self.client.messages.create(
+                model=self.MODEL_FAST,
+                max_tokens=50,
+                temperature=0,
+                system=SYSTEM_PROMPT,
+                messages=[{
+                    "role": "user",
+                    "content": f"""Extract {max_keywords} key topics from this content.
+Return ONLY comma-separated keywords. No explanation.
+
+Text: {body_text[:1500]}
+
+Keywords:"""
+                }]
+            )
+            
+            result = response.content[0].text.strip()
+            keywords = [k.strip().lower() for k in result.split(',') if k.strip()]
+            
+            # Validate: keywords must exist in body
+            valid_keywords = [k for k in keywords if k in body_text.lower()]
+            
+            if valid_keywords:
+                self.logger.log_action("extract_keywords", "success", keywords=valid_keywords)
+                return valid_keywords[:max_keywords]
+            else:
+                self.logger.log_action("extract_keywords", "rejected", reason="no_valid_keywords")
+                return None
+                
+        except Exception as e:
+            self.logger.log_error(f"Claude API error: {str(e)}", error_type="api_error")
+            return None
+    
+    async def detect_language(self, body_text: str) -> Optional[str]:
+        """Detect content language. Returns ISO language code (en, es, fr, etc.)."""
+        if not self.client or not body_text or len(body_text) < 50:
+            return None
+        
+        VALID_LANGUAGES = ["en", "es", "fr", "de", "it", "pt", "ru", "zh", "ja", "ko", "ar", "hi", "nl", "pl", "tr", "vi", "th", "sv", "da", "no", "fi"]
+        
+        try:
+            self.logger.log_action("detect_language", "started")
+            
+            response = self.client.messages.create(
+                model=self.MODEL_FAST,
+                max_tokens=10,
+                temperature=0,
+                system=SYSTEM_PROMPT,
+                messages=[{
+                    "role": "user",
+                    "content": f"""What language is this text? Return ONLY the 2-letter ISO code (en, es, fr, etc.)
+
+Text: {body_text[:500]}
+
+Language:"""
+                }]
+            )
+            
+            result = response.content[0].text.strip().lower()[:2]
+            
+            if result in VALID_LANGUAGES:
+                self.logger.log_action("detect_language", "success", language=result)
+                return result
+            else:
+                self.logger.log_action("detect_language", "rejected", output=result)
+                return None
+                
+        except Exception as e:
+            self.logger.log_error(f"Claude API error: {str(e)}", error_type="api_error")
+            return None
+    
     async def classify_article_section(self, content_excerpt: str) -> Optional[str]:
         """
         Classify article into a category from controlled enum.

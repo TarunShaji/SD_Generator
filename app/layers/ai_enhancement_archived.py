@@ -114,10 +114,43 @@ class AIEnhancementLayer:
             return content, report
         
         # =====================================================================
+        # Enhancement 0: Content Type Classification (ALWAYS in AI mode)
+        # =====================================================================
+        UNCERTAIN_TYPES = ["unknown", "webpage"]
+        should_reclassify = content.content_type.value in UNCERTAIN_TYPES or True  # Always in AI mode
+        
+        self.logger.log_action(
+            "content_type_classification",
+            "evaluating",
+            current_type=content.content_type.value,
+            should_reclassify=should_reclassify
+        )
+        
+        if should_reclassify and body_text:
+            ai_type = await self._classify_content_type(body_text, content.url, report)
+            if ai_type:
+                old_type = content.content_type.value
+                try:
+                    content.content_type = ContentType(ai_type)
+                    self.logger.log_action(
+                        "content_type_classification",
+                        "applied",
+                        previous=old_type,
+                        new_type=ai_type
+                    )
+                except ValueError:
+                    self.logger.log_action(
+                        "content_type_classification",
+                        "failed",
+                        reason="invalid_enum_value",
+                        value=ai_type
+                    )
+        
+        # =====================================================================
         # Enhancement 1: Author name cleaning/extraction
         # =====================================================================
         # Blacklist of placeholder author values that should trigger AI extraction
-        INVALID_AUTHORS = ["publisher", "admin", "editor", "author", "staff", "webmaster", "guest", "anonymous", "contributor"]
+        INVALID_AUTHORS = ["publisher", "admin", "editor", "author", "staff", "webmaster", "guest", "anonymous"]
         
         has_valid_author = content.author and content.author.lower() not in INVALID_AUTHORS
         
@@ -146,13 +179,14 @@ class AIEnhancementLayer:
                     reason="no_enhancement_needed_or_failed"
                 )
         else:
-            # Author missing or blacklisted - try AI extraction from body text
-            blacklisted = content.author.lower() in INVALID_AUTHORS if content.author else False
-            if content.content_type.value in ["article", "blog_post", "news_article"] and body_text:
+            # No valid author found - try AI extraction from body text
+            if content.content_type.value in ["article", "blog_post"] and body_text:
+                blacklisted = content.author.lower() in INVALID_AUTHORS if content.author else False
                 self.logger.log_action(
                     "author_extraction",
                     "attempting",
-                    reason="no_author_in_html"
+                    reason="blacklisted_author" if blacklisted else "no_author_in_html",
+                    blacklisted_value=content.author if blacklisted else None
                 )
                 extracted_author = await self._extract_author(body_text, report)
                 if extracted_author:
@@ -179,14 +213,13 @@ class AIEnhancementLayer:
         # Enhancement 2: Article section classification (ALWAYS in AI mode)
         # =====================================================================
         content_type_value = content.content_type.value
-        # Always classify section for article types in AI mode - override scraped junk
-        should_classify = content_type_value in ["article", "blog_post", "news_article"]
+        should_classify = content_type_value in ["article", "blog_post"]
         
         self.logger.log_action(
             "section_classification",
             "evaluating",
             content_type=content_type_value,
-            has_article_section=(content.article_section is not None),
+            existing_section=content.article_section,
             should_classify=should_classify
         )
         
@@ -197,7 +230,8 @@ class AIEnhancementLayer:
                 self.logger.log_action(
                     "section_classification",
                     "applied",
-                    section=section
+                    previous=content.article_section,
+                    new_section=section
                 )
                 content.article_section = section
             else:
@@ -245,62 +279,50 @@ class AIEnhancementLayer:
                 )
         
         # =====================================================================
-        # Enhancement 4: Content Type Classification (AI as sole classifier)
+        # Enhancement 4: Published date extraction
         # =====================================================================
-        self.logger.log_action("content_type_classification", "evaluating", current=content.content_type.value)
+        content_type_for_date = content.content_type.value
+        needs_date = not content.published_date and content_type_for_date in ["article", "news_article", "blog_post"]
         
-        ai_type = await self._classify_content_type(body_text or content.body, content.url, report)
-        if ai_type:
-            try:
-                content.content_type = ContentType(ai_type)
-                self.logger.log_action("content_type_classification", "applied", new_type=ai_type)
-            except ValueError:
-                pass
-        
-        # =====================================================================
-        # Enhancement 5: Published Date Extraction
-        # =====================================================================
-        content_type_value = content.content_type.value
-        needs_date = not content.published_date and content_type_value in ["article", "news_article", "blog_post"]
+        self.logger.log_action(
+            "date_extraction",
+            "evaluating",
+            has_date=(content.published_date is not None),
+            content_type=content_type_for_date,
+            needs_extraction=needs_date
+        )
         
         if needs_date and body_text:
-            self.logger.log_action("date_extraction", "attempting")
-            date = await self._extract_date(body_text, report)
-            if date:
-                content.published_date = date
-                self.logger.log_action("date_extraction", "applied", date=date)
+            extracted_date = await self._extract_date(body_text, report)
+            if extracted_date:
+                self.logger.log_action(
+                    "date_extraction",
+                    "applied",
+                    date=extracted_date
+                )
+                content.published_date = extracted_date
         
         # =====================================================================
-        # Enhancement 6: Publisher Extraction
+        # Enhancement 5: Publisher/Organization extraction
         # =====================================================================
-        needs_publisher = not content.organization_name and content_type_value in ["article", "news_article", "blog_post"]
+        needs_publisher = not content.organization_name and content_type_for_date in ["article", "news_article", "blog_post"]
+        
+        self.logger.log_action(
+            "publisher_extraction",
+            "evaluating",
+            has_publisher=(content.organization_name is not None),
+            needs_extraction=needs_publisher
+        )
         
         if needs_publisher and body_text:
-            self.logger.log_action("publisher_extraction", "attempting")
-            publisher = await self._extract_publisher(body_text, content.url, report)
-            if publisher:
-                content.organization_name = publisher
-                self.logger.log_action("publisher_extraction", "applied", publisher=publisher)
-        
-        # =====================================================================
-        # Enhancement 7: Keywords Extraction
-        # =====================================================================
-        if not content.keywords and body_text:
-            self.logger.log_action("keywords_extraction", "attempting")
-            keywords = await self._extract_keywords(body_text, report)
-            if keywords:
-                content.keywords = keywords
-                self.logger.log_action("keywords_extraction", "applied", keywords=keywords)
-        
-        # =====================================================================
-        # Enhancement 8: Language Detection
-        # =====================================================================
-        if not content.language and body_text:
-            self.logger.log_action("language_detection", "attempting")
-            lang = await self._detect_language(body_text, report)
-            if lang:
-                content.language = lang
-                self.logger.log_action("language_detection", "applied", language=lang)
+            extracted_publisher = await self._extract_publisher(body_text, content.url, report)
+            if extracted_publisher:
+                self.logger.log_action(
+                    "publisher_extraction",
+                    "applied",
+                    publisher=extracted_publisher
+                )
+                content.organization_name = extracted_publisher
         
         # =====================================================================
         # Final summary
@@ -399,6 +421,71 @@ class AIEnhancementLayer:
         
         return author
     
+    async def _classify_content_type(
+        self, 
+        body_text: str, 
+        url: str,
+        report: AIEnhancementReport
+    ) -> Optional[str]:
+        """Classify content type using AI."""
+        
+        content_type = await self.claude.classify_content_type(body_text, url)
+        
+        result = EnhancementResult(
+            field="contentType",
+            original=None,
+            enhanced=content_type,
+            enhancement_type="classification",
+            success=content_type is not None,
+            reason=None if content_type else "classification_failed"
+        )
+        report.add_enhancement(result)
+        
+        return content_type
+    
+    async def _extract_date(
+        self, 
+        body_text: str, 
+        report: AIEnhancementReport
+    ) -> Optional[str]:
+        """Extract published date from body text using AI."""
+        
+        date = await self.claude.extract_published_date(body_text)
+        
+        result = EnhancementResult(
+            field="datePublished",
+            original=None,
+            enhanced=date,
+            enhancement_type="extraction",
+            success=date is not None,
+            reason=None if date else "extraction_failed"
+        )
+        report.add_enhancement(result)
+        
+        return date
+    
+    async def _extract_publisher(
+        self, 
+        body_text: str, 
+        url: str,
+        report: AIEnhancementReport
+    ) -> Optional[str]:
+        """Extract publisher/organization from content using AI."""
+        
+        publisher = await self.claude.extract_publisher(body_text, url)
+        
+        result = EnhancementResult(
+            field="publisher",
+            original=None,
+            enhanced=publisher,
+            enhancement_type="extraction",
+            success=publisher is not None,
+            reason=None if publisher else "extraction_failed"
+        )
+        report.add_enhancement(result)
+        
+        return publisher
+    
     async def _enhance_section(
         self, 
         body_text: Optional[str], 
@@ -490,72 +577,3 @@ class AIEnhancementLayer:
         )
         
         return description
-    
-    # =========================================================================
-    # NEW AI ENHANCEMENT HELPERS
-    # =========================================================================
-    
-    async def _classify_content_type(
-        self, body_text: str, url: str, report: AIEnhancementReport
-    ) -> Optional[str]:
-        """Classify content type using AI."""
-        content_type = await self.claude.classify_content_type(body_text, url)
-        result = EnhancementResult(
-            field="contentType", original=None, enhanced=content_type,
-            enhancement_type="classification", success=content_type is not None,
-            reason=None if content_type else "classification_failed"
-        )
-        report.add_enhancement(result)
-        return content_type
-    
-    async def _extract_date(
-        self, body_text: str, report: AIEnhancementReport
-    ) -> Optional[str]:
-        """Extract published date using AI."""
-        date = await self.claude.extract_published_date(body_text)
-        result = EnhancementResult(
-            field="datePublished", original=None, enhanced=date,
-            enhancement_type="extraction", success=date is not None,
-            reason=None if date else "extraction_failed"
-        )
-        report.add_enhancement(result)
-        return date
-    
-    async def _extract_publisher(
-        self, body_text: str, url: str, report: AIEnhancementReport
-    ) -> Optional[str]:
-        """Extract publisher using AI."""
-        publisher = await self.claude.extract_publisher(body_text, url)
-        result = EnhancementResult(
-            field="publisher", original=None, enhanced=publisher,
-            enhancement_type="extraction", success=publisher is not None,
-            reason=None if publisher else "extraction_failed"
-        )
-        report.add_enhancement(result)
-        return publisher
-    
-    async def _extract_keywords(
-        self, body_text: str, report: AIEnhancementReport
-    ) -> Optional[list]:
-        """Extract keywords using AI."""
-        keywords = await self.claude.extract_keywords(body_text)
-        result = EnhancementResult(
-            field="keywords", original=None, enhanced=keywords,
-            enhancement_type="extraction", success=keywords is not None,
-            reason=None if keywords else "extraction_failed"
-        )
-        report.add_enhancement(result)
-        return keywords
-    
-    async def _detect_language(
-        self, body_text: str, report: AIEnhancementReport
-    ) -> Optional[str]:
-        """Detect content language using AI."""
-        lang = await self.claude.detect_language(body_text)
-        result = EnhancementResult(
-            field="language", original=None, enhanced=lang,
-            enhancement_type="detection", success=lang is not None,
-            reason=None if lang else "detection_failed"
-        )
-        report.add_enhancement(result)
-        return lang

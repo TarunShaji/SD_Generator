@@ -189,6 +189,9 @@ class SchemaGenerator:
         elif content.content_type == ContentType.ARTICLE:
             return self._generate_article(content)
         
+        elif content.content_type == ContentType.NEWS_ARTICLE:
+            return self._generate_article(content)  # NewsArticle uses Article schema
+        
         elif content.content_type == ContentType.SERVICE:
             return self._generate_service(content)
         

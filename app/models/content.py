@@ -18,14 +18,35 @@ class SourceType(str, Enum):
 
 class ContentType(str, Enum):
     """Detected content type for schema generation."""
+    # Editorial content
     ARTICLE = "article"
     BLOG_POST = "blog_post"
-    SERVICE = "service"
+    NEWS_ARTICLE = "news_article"
+    
+    # Commercial content
     PRODUCT = "product"
+    SERVICE = "service"
+    
+    # Instructional content
+    RECIPE = "recipe"
+    HOW_TO = "how_to"
+    
+    # Structured content
     FAQ = "faq"
+    EVENT = "event"
+    VIDEO = "video"
+    
+    # Business content
+    LOCAL_BUSINESS = "local_business"
     ABOUT = "about"
     CONTACT = "contact"
+    
+    # Navigation content
     HOME = "home"
+    COLLECTION = "collection"
+    
+    # Fallback
+    WEBPAGE = "webpage"
     UNKNOWN = "unknown"
 
 
@@ -163,6 +184,10 @@ class NormalizedContent(BaseModel):
     author: Optional[str] = None
     published_date: Optional[str] = None
     modified_date: Optional[str] = None
+    
+    # AI-extracted fields
+    keywords: List[str] = Field(default_factory=list)  # Top keywords from content
+    language: Optional[str] = None  # ISO language code (en, es, fr, etc.)
     
     # Organization/Business info (if detected)
     organization_name: Optional[str] = None

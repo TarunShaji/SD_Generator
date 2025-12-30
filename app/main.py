@@ -176,10 +176,32 @@ async def generate_schema(request: GenerateRequest):
                 content=content,
                 body_text=content.body
             )
+            
+            # Extensive logging for debugging
             logger.info(
                 "ai_enhancement_applied",
                 ai_enhanced=ai_report.ai_enhanced,
-                enhancements_count=len([e for e in ai_report.enhancements if e.success])
+                enhancements_count=len([e for e in ai_report.enhancements if e.success]),
+                all_enhancements=[
+                    {"field": e.field, "success": e.success, "reason": e.reason, "enhanced": str(e.enhanced)[:50] if e.enhanced else None}
+                    for e in ai_report.enhancements
+                ]
+            )
+            logger.info(
+                "ai_enhanced_content",
+                content_type=content.content_type.value,
+                author=content.author,
+                published_date=content.published_date,
+                organization=content.organization_name,
+                keywords=content.keywords,
+                language=content.language,
+                article_section=content.article_section
+            )
+        else:
+            logger.info(
+                "ai_enhancement_skipped",
+                ai_enhance_requested=ai_enhance,
+                ai_layer_available=ai_enhancement_layer.is_available()
             )
         
         # Generate schemas

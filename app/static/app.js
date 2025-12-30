@@ -25,7 +25,8 @@ const retryBtn = document.getElementById('retry-btn');
 // Disclaimers
 const DISCLAIMERS = {
     cms: 'For CMS-based generation, API access may be required. Public self-hosted WordPress sites usually do not require authentication. WordPress.com sites may require OAuth connection.',
-    html: 'HTML-only generation does not use CMS data and may be less accurate. This mode does not require CMS access and works with any website.'
+    html: 'HTML-only generation does not use CMS data and may be less accurate. This mode does not require CMS access and works with any website.',
+    ai: 'AI-Enhanced mode uses Claude AI to clean author names, classify article sections, and generate descriptions. This provides the most complete schema output.'
 };
 
 // Initialize
@@ -63,12 +64,15 @@ function selectMode(mode) {
         card.classList.toggle('selected', card.dataset.mode === mode);
     });
 
-    // Update form title
-    formTitle.textContent = mode === 'cms'
-        ? 'CMS-Based Generation'
-        : 'HTML-Only Generation';
+    // Update form title based on mode
+    const titles = {
+        cms: 'CMS-Based Generation',
+        html: 'HTML-Only Generation',
+        ai: 'AI-Enhanced Generation'
+    };
+    formTitle.textContent = titles[mode] || 'Generate Structured Data';
 
-    // Show/hide CMS selector
+    // Show/hide CMS selector (only for CMS mode)
     cmsSelectGroup.classList.toggle('hidden', mode !== 'cms');
 
     // Update disclaimer
@@ -118,6 +122,13 @@ async function handleSubmit(e) {
     setLoading(true);
 
     try {
+        // AI mode = HTML scraping + AI enhancement
+        const isAIMode = currentMode === 'ai';
+        const apiMode = isAIMode ? 'html' : currentMode;
+        const aiEnhance = isAIMode;
+
+        console.log(`[Schema Generator] Mode: ${currentMode}, API Mode: ${apiMode}, AI Enhance: ${aiEnhance}`);
+
         const response = await fetch('/api/generate', {
             method: 'POST',
             headers: {
@@ -125,8 +136,9 @@ async function handleSubmit(e) {
             },
             body: JSON.stringify({
                 url: url,
-                mode: currentMode,
+                mode: apiMode,
                 cms_type: cmsType !== 'auto' ? cmsType : null,
+                ai_enhance: aiEnhance,
             }),
         });
 

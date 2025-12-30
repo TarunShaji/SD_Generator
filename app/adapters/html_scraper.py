@@ -150,6 +150,10 @@ class HTMLScraper:
             og_image=og_image,
             word_count=word_count,
             article_signals=article_signals,
+            # Universal metadata fields
+            language=self._extract_language(soup),
+            canonical_url=self._extract_canonical_url(soup, url),
+            article_section=self._extract_article_section(breadcrumbs),
         )
         
         # Compute capability flags (metadata only)
@@ -404,132 +408,153 @@ class HTMLScraper:
         body: Optional[str] = None
     ) -> Tuple[ContentType, List[str]]:
         """
-        Detect the type of content based on multiple signals.
+        Detect the type of content using hardened, deterministic classification.
         
-        Returns: (ContentType, list of signals used for classification)
+        Priority Order:
+        1. Product (absolute - never override)
+        2. Explicit JSON-LD type (authoritative)
+        3. Article/BlogPosting (≥2 signals, no commerce)
+        4. URL-based (weak signal)
+        5. FAQ (≥3 structured Q&A)
+        6. Home page
+        7. WebPage (fallback)
         
-        Article/BlogPosting Classification:
-        - Classify if ≥2 article signals are present
-        - Prefer BlogPosting for blog URLs
-        - Prefer Article for news/editorial
+        Returns: (ContentType, list of signals used)
         """
         url_lower = url.lower()
         article_signals = []
+        commerce_signals = []
+        jsonld_type = None
         
         # =====================================================================
-        # SIGNAL COLLECTION (8 Article Signals)
+        # STEP 1: Detect Commerce Signals (BLOCKING for Article)
         # =====================================================================
         
-        # Signal 1: <article> element exists
+        # Check for price in DOM
+        price_elem = soup.find(class_=re.compile(r"price", re.I))
+        if price_elem and re.search(r"[\$€£¥]\s*\d", price_elem.get_text()):
+            commerce_signals.append("price_visible")
+        
+        # Check for add to cart buttons
+        add_to_cart = soup.find(string=re.compile(r"add to (cart|bag|basket)", re.I))
+        if add_to_cart:
+            commerce_signals.append("add_to_cart")
+        
+        # Check for variant selectors
+        variant_selectors = soup.find(attrs={"name": re.compile(r"variant|size|color", re.I)})
+        if variant_selectors:
+            commerce_signals.append("variant_selector")
+        
+        # Check for checkout/buy CTA
+        checkout_cta = soup.find(string=re.compile(r"(buy now|checkout|purchase)", re.I))
+        if checkout_cta:
+            commerce_signals.append("checkout_cta")
+        
+        # URL commerce patterns
+        if any(p in url_lower for p in ["/product", "/products", "/shop/", "/cart", "/checkout"]):
+            commerce_signals.append("commerce_url")
+        
+        # =====================================================================
+        # STEP 2: Collect Article Signals
+        # =====================================================================
+        
         if soup.find("article"):
             article_signals.append("article_element")
         
-        # Signal 2: article:published_time meta
         if soup.find("meta", property="article:published_time"):
             article_signals.append("published_time")
         
-        # Signal 3: article:modified_time meta
         if soup.find("meta", property="article:modified_time"):
             article_signals.append("modified_time")
         
-        # Signal 4: article:author meta
         if soup.find("meta", property="article:author"):
             article_signals.append("article_author_meta")
         
-        # Signal 5: Author present (name meta or visible)
         has_author = (
             soup.find("meta", attrs={"name": "author"}) or
             soup.find(attrs={"rel": "author"}) or
-            soup.find(class_=re.compile(r"author|byline", re.I))
+            soup.find(class_=re.compile(r"^(author|byline)$", re.I))
         )
         if has_author:
             article_signals.append("author")
         
-        # Signal 6: <time datetime> element
         if soup.find("time", datetime=True):
             article_signals.append("time_element")
         
-        # Signal 7: URL patterns for articles/blogs
-        article_url_patterns = [
-            "/blog/", "/news/", "/article/", "/articles/", "/post/", "/posts/",
-            "/technology/", "/science/", "/opinion/", "/features/", "/story/"
-        ]
+        article_url_patterns = ["/blog/", "/news/", "/article/", "/articles/", "/post/", "/posts/",
+                                "/technology/", "/science/", "/opinion/", "/features/", "/story/"]
         if any(pattern in url_lower for pattern in article_url_patterns):
             article_signals.append("url_pattern")
         
-        # Signal 6: Long-form content (≥300 words)
-        if body:
-            word_count = len(body.split())
-            if word_count >= 300:
-                article_signals.append("long_form_content")
+        if body and len(body.split()) >= 300:
+            article_signals.append("long_form_content")
         
-        # Signal 7: Single H1 (headline pattern)
         h1_count = len([h for h in headings if h.level == 1])
         if h1_count == 1:
             article_signals.append("single_h1")
         
         # =====================================================================
-        # PRIORITY 1: Product Detection (check first)
+        # PRIORITY 1: Product (Absolute - Never Override)
         # =====================================================================
         
-        if "/product" in url_lower or "/shop/" in url_lower:
-            self._log_classification("product", "url_pattern", [])
-            return ContentType.PRODUCT, []
-        
-        # Check for Product schema in JSON-LD
+        # Check JSON-LD for Product FIRST
         for script in soup.find_all("script", type="application/ld+json"):
             try:
                 data = json.loads(script.string)
-                schema_type = str(data.get("@type", "")).lower()
-                if "product" in schema_type:
-                    self._log_classification("product", "jsonld_schema", [])
+                schema_type = self._get_jsonld_type(data)
+                if "product" in schema_type.lower():
+                    self._log_classification("product", "jsonld_schema", [], commerce_signals)
                     return ContentType.PRODUCT, []
+                if schema_type:
+                    jsonld_type = schema_type
             except:
                 pass
         
+        # Commerce signals → Product
+        if commerce_signals:
+            self._log_classification("product", "commerce_signals", [], commerce_signals)
+            return ContentType.PRODUCT, []
+        
         # =====================================================================
-        # PRIORITY 2: Article/BlogPosting (≥2 signals)
+        # PRIORITY 2: Explicit JSON-LD Type (Authoritative - Trust Over Heuristics)
         # =====================================================================
         
-        if len(article_signals) >= 2:
-            # Determine if BlogPosting or Article
-            is_blog = (
-                "/blog" in url_lower or 
-                "/post" in url_lower or
-                "blog" in url_lower.split("/")
-            )
+        if jsonld_type:
+            jl = jsonld_type.lower()
+            if "article" in jl or "blogposting" in jl or "newsarticle" in jl:
+                # JSON-LD says Article - trust it
+                if "blog" in jl:
+                    self._log_classification("blogposting", "jsonld_authoritative", ["jsonld:" + jsonld_type], [])
+                    return ContentType.BLOG_POST, ["jsonld:" + jsonld_type]
+                else:
+                    self._log_classification("article", "jsonld_authoritative", ["jsonld:" + jsonld_type], [])
+                    return ContentType.ARTICLE, ["jsonld:" + jsonld_type]
+            if "service" in jl:
+                return ContentType.SERVICE, ["jsonld:" + jsonld_type]
+            if "faqpage" in jl:
+                return ContentType.FAQ, ["jsonld:" + jsonld_type]
+        
+        # =====================================================================
+        # PRIORITY 3: Article/BlogPosting (≥2 signals, NO commerce)
+        # =====================================================================
+        
+        # Commerce signals BLOCK Article classification
+        if len(article_signals) >= 2 and not commerce_signals:
+            is_blog = "/blog" in url_lower or "/post" in url_lower
             
             if is_blog:
-                self._log_classification("blogposting", "signal_based", article_signals)
+                self._log_classification("blogposting", "signal_based", article_signals, [])
                 return ContentType.BLOG_POST, article_signals
             else:
-                self._log_classification("article", "signal_based", article_signals)
+                self._log_classification("article", "signal_based", article_signals, [])
                 return ContentType.ARTICLE, article_signals
         
         # =====================================================================
-        # PRIORITY 3: Existing JSON-LD Schema Type
-        # =====================================================================
-        
-        for script in soup.find_all("script", type="application/ld+json"):
-            try:
-                data = json.loads(script.string)
-                schema_type = str(data.get("@type", "")).lower()
-                if "article" in schema_type or "blogposting" in schema_type:
-                    self._log_classification("article", "jsonld_schema", ["jsonld_type"])
-                    return ContentType.ARTICLE, ["jsonld_type"]
-                if "service" in schema_type:
-                    return ContentType.SERVICE, []
-                if "faqpage" in schema_type:
-                    return ContentType.FAQ, []
-            except:
-                pass
-        
-        # =====================================================================
-        # PRIORITY 4: URL-Based Detection (Other Types)
+        # PRIORITY 4: URL-Based Detection (Weak Signal)
         # =====================================================================
         
         if "/service" in url_lower:
-            self._log_classification("service", "url_pattern", [])
+            self._log_classification("service", "url_pattern_weak", [], [])
             return ContentType.SERVICE, []
         if "/about" in url_lower:
             return ContentType.ABOUT, []
@@ -539,23 +564,14 @@ class HTMLScraper:
             return ContentType.FAQ, []
         
         # =====================================================================
-        # PRIORITY 5: FAQ Detection (3+ Q&A pairs)
+        # PRIORITY 5: FAQ Detection (Strict - ≥3 structured Q&A)
         # =====================================================================
         
         if len(faq) >= 3:
             return ContentType.FAQ, []
         
         # =====================================================================
-        # PRIORITY 6: Single Article Signal (still classify as article)
-        # =====================================================================
-        
-        if len(article_signals) == 1:
-            # Single signal: still classify as article but log
-            self._log_classification("article", "single_signal", article_signals)
-            return ContentType.ARTICLE, article_signals
-        
-        # =====================================================================
-        # PRIORITY 7: Home Page Detection
+        # PRIORITY 6: Home Page Detection
         # =====================================================================
         
         parsed = urlparse(url)
@@ -563,20 +579,49 @@ class HTMLScraper:
             return ContentType.HOME, []
         
         # =====================================================================
-        # FALLBACK: Unknown
+        # FALLBACK: WebPage (Single signal NOT enough for Article)
         # =====================================================================
         
-        self._log_classification("unknown", "no_signals", article_signals)
+        # Single signal → WebPage, NOT Article
+        if len(article_signals) == 1:
+            self._log_classification("webpage", "single_signal_insufficient", article_signals, [])
+        else:
+            self._log_classification("webpage", "no_signals", article_signals, [])
+        
         return ContentType.UNKNOWN, article_signals
     
-    def _log_classification(self, decision: str, reason: str, signals: List[str]):
-        """Log article classification decision."""
+    def _get_jsonld_type(self, data: dict) -> str:
+        """Extract @type from JSON-LD, handling @graph."""
+        if not isinstance(data, dict):
+            return ""
+        
+        # Direct type
+        if "@type" in data:
+            t = data["@type"]
+            if isinstance(t, list):
+                return t[0] if t else ""
+            return str(t)
+        
+        # Check @graph for main type
+        if "@graph" in data:
+            for item in data["@graph"]:
+                if isinstance(item, dict) and "@type" in item:
+                    t = item["@type"]
+                    if isinstance(t, str):
+                        if t.lower() in ["article", "blogposting", "newsarticle", "product"]:
+                            return t
+        
+        return ""
+    
+    def _log_classification(self, decision: str, reason: str, signals: List[str], blocked_by: List[str]):
+        """Log classification decision with blocking signals."""
         self.logger.log_action(
-            "article_classification",
+            "content_type_decision",
             "decision",
-            content_type=decision,
+            result=decision,
             reason=reason,
             signals_used=signals,
+            signals_blocked=blocked_by,
             signal_count=len(signals)
         )
     
@@ -846,6 +891,108 @@ class HTMLScraper:
         time_elem = soup.find("time", attrs={"datetime": True})
         if time_elem:
             return time_elem["datetime"]
+        
+        return None
+    
+    def _extract_language(self, soup: BeautifulSoup) -> Optional[str]:
+        """
+        Extract page language.
+        
+        Sources (priority order):
+        1. <html lang="...">
+        2. <meta http-equiv="content-language">
+        
+        Returns: Language code (e.g., "en", "en-US") or None
+        """
+        # Priority 1: html lang attribute
+        html_tag = soup.find("html")
+        if html_tag and html_tag.get("lang"):
+            lang = html_tag["lang"].strip()
+            if lang and len(lang) <= 10:  # Valid language codes are short
+                return lang
+        
+        # Priority 2: meta content-language
+        meta_lang = soup.find("meta", attrs={"http-equiv": "content-language"})
+        if meta_lang and meta_lang.get("content"):
+            return meta_lang["content"].strip()
+        
+        return None
+    
+    def _extract_canonical_url(self, soup: BeautifulSoup, fallback_url: str) -> str:
+        """
+        Extract canonical URL.
+        
+        Sources:
+        1. <link rel="canonical">
+        2. og:url
+        3. Fallback to provided URL (stripped of tracking params)
+        
+        Returns: Clean canonical URL
+        """
+        # Priority 1: link rel="canonical"
+        canonical = soup.find("link", rel="canonical")
+        if canonical and canonical.get("href"):
+            url = canonical["href"].strip()
+            if url.startswith("http"):
+                return self._strip_tracking_params(url)
+        
+        # Priority 2: og:url
+        og_url = soup.find("meta", property="og:url")
+        if og_url and og_url.get("content"):
+            url = og_url["content"].strip()
+            if url.startswith("http"):
+                return self._strip_tracking_params(url)
+        
+        # Fallback: strip tracking from provided URL
+        return self._strip_tracking_params(fallback_url)
+    
+    def _strip_tracking_params(self, url: str) -> str:
+        """Strip tracking parameters and fragments from URL."""
+        # Remove fragment
+        if "#" in url:
+            url = url.split("#")[0]
+        
+        # Remove common tracking parameters
+        if "?" in url:
+            base, query = url.split("?", 1)
+            params = query.split("&")
+            clean_params = []
+            tracking_prefixes = ["utm_", "fbclid", "gclid", "ref", "source", "campaign"]
+            for param in params:
+                key = param.split("=")[0].lower()
+                if not any(key.startswith(p) for p in tracking_prefixes):
+                    clean_params.append(param)
+            if clean_params:
+                url = base + "?" + "&".join(clean_params)
+            else:
+                url = base
+        
+        return url
+    
+    def _extract_article_section(self, breadcrumbs: List[BreadcrumbItem]) -> Optional[str]:
+        """
+        Extract article section from breadcrumbs.
+        
+        Uses the last breadcrumb before the article itself (i.e., the category).
+        
+        Returns: Section name or None
+        """
+        if not breadcrumbs or len(breadcrumbs) < 2:
+            return None
+        
+        # The category is typically the second-to-last item
+        # (last is the article, first is Home)
+        if len(breadcrumbs) >= 2:
+            # Get the item before the last one
+            section = breadcrumbs[-2].name
+            if section and section.lower() not in ["home", "index"]:
+                return section
+        
+        # Try the second item if we have at least 3
+        if len(breadcrumbs) >= 3:
+            section = breadcrumbs[1].name
+            if section and section.lower() not in ["home", "index"]:
+                return section
         
         return None
     

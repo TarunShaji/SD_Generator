@@ -185,6 +185,11 @@ class NormalizedContent(BaseModel):
     word_count: int = 0  # Body text word count (for long-form detection)
     article_signals: List[str] = Field(default_factory=list)  # Signals used for classification
     
+    # Universal metadata fields
+    language: Optional[str] = None  # From <html lang>
+    canonical_url: Optional[str] = None  # From <link rel="canonical">
+    article_section: Optional[str] = None  # From breadcrumbs or category
+    
     # Capability flags (computed from extracted data)
     capabilities: Optional[ProductCapabilities] = None
     

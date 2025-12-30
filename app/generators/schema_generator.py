@@ -281,6 +281,15 @@ class SchemaGenerator:
             article_signals=content.article_signals
         )
         
+        # Build isPartOf (WebSite context) if we have organization name
+        is_part_of = None
+        if content.organization_name:
+            is_part_of = {
+                "@type": "WebSite",
+                "name": content.organization_name,
+                "url": content.canonical_url.split("/")[0] + "//" + content.canonical_url.split("/")[2] if content.canonical_url else None
+            }
+        
         schema = ArticleSchema(
             headline=headline,
             description=self._truncate(content.description, 300) if content.description else None,
@@ -289,7 +298,10 @@ class SchemaGenerator:
             publisher=publisher,
             datePublished=normalize_date(content.published_date),
             dateModified=normalize_date(content.modified_date),
-            mainEntityOfPage=content.url,
+            mainEntityOfPage=content.canonical_url or content.url,
+            inLanguage=content.language,
+            articleSection=content.article_section,
+            isPartOf=is_part_of,
         )
         
         return schema.to_jsonld()
@@ -335,12 +347,23 @@ class SchemaGenerator:
                      (["image"] if image else []) +
                      (["author"] if author else []) +
                      (["publisher"] if publisher else []) +
-                     (["datePublished"] if content.published_date else []),
+                     (["datePublished"] if content.published_date else []) +
+                     (["inLanguage"] if content.language else []) +
+                     (["articleSection"] if content.article_section else []),
             missing=([] if image else ["image"]) +
                     ([] if author else ["author"]) +
                     ([] if publisher else ["publisher"]),
             article_signals=content.article_signals
         )
+        
+        # Build isPartOf (WebSite context) if we have organization name
+        is_part_of = None
+        if content.organization_name:
+            is_part_of = {
+                "@type": "WebSite",
+                "name": content.organization_name,
+                "url": content.canonical_url.split("/")[0] + "//" + content.canonical_url.split("/")[2] if content.canonical_url else None
+            }
         
         schema = BlogPostingSchema(
             headline=headline,
@@ -350,7 +373,10 @@ class SchemaGenerator:
             publisher=publisher,
             datePublished=normalize_date(content.published_date),
             dateModified=normalize_date(content.modified_date),
-            mainEntityOfPage=content.url,
+            mainEntityOfPage=content.canonical_url or content.url,
+            inLanguage=content.language,
+            articleSection=content.article_section,
+            isPartOf=is_part_of,
         )
         
         return schema.to_jsonld()

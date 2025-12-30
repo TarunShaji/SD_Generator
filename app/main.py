@@ -17,6 +17,7 @@ from app.utils.logger import get_logger, set_trace_id
 from app.layers.cms_detection import CMSDetectionLayer, CMSType
 from app.layers.auth import AuthenticationLayer
 from app.layers.ingestion import IngestionLayer
+from app.layers.ai_enhancement import AIEnhancementLayer
 from app.generators.schema_generator import SchemaGenerator
 
 
@@ -40,6 +41,7 @@ app.add_middleware(
 cms_detector = CMSDetectionLayer()
 auth_layer = AuthenticationLayer()
 ingestion_layer = IngestionLayer()
+ai_enhancement_layer = AIEnhancementLayer()
 schema_generator = SchemaGenerator()
 
 logger = get_logger("main")
@@ -51,6 +53,7 @@ class GenerateRequest(BaseModel):
     url: str
     mode: str = "cms"  # "cms" or "html"
     cms_type: Optional[str] = None  # "wordpress" or "shopify"
+    ai_enhance: bool = False  # Enable AI-powered enhancements
 
 
 class GenerateResponse(BaseModel):
@@ -64,6 +67,8 @@ class GenerateResponse(BaseModel):
     schemas: list
     script_tag: str
     trace_id: str
+    ai_enhanced: bool = False
+    ai_enhancements: Optional[list] = None
 
 
 class CMSDetectionResponse(BaseModel):
@@ -132,11 +137,24 @@ async def generate_schema(request: GenerateRequest):
         url=request.url,
         mode=request.mode,
         cms_type=request.cms_type,
+        ai_enhance=request.ai_enhance,
         trace_id=trace_id
     )
     
     try:
-        force_html = request.mode == "html"
+        # Handle AI mode: treat as HTML + ai_enhance
+        is_ai_mode = request.mode == "ai"
+        effective_mode = "html" if is_ai_mode else request.mode
+        ai_enhance = request.ai_enhance or is_ai_mode
+        
+        logger.info(
+            "mode_resolved",
+            original_mode=request.mode,
+            effective_mode=effective_mode,
+            ai_enhance=ai_enhance
+        )
+        
+        force_html = effective_mode == "html"
         cms_result = None
         
         # Detect CMS if in CMS mode
@@ -149,6 +167,20 @@ async def generate_schema(request: GenerateRequest):
             cms_result=cms_result,
             force_html=force_html,
         )
+        
+        # Apply AI enhancements if requested
+        ai_report = None
+        if ai_enhance and ai_enhancement_layer.is_available():
+            logger.info("ai_enhancement_starting", url=request.url)
+            content, ai_report = await ai_enhancement_layer.enhance_content(
+                content=content,
+                body_text=content.body
+            )
+            logger.info(
+                "ai_enhancement_applied",
+                ai_enhanced=ai_report.ai_enhanced,
+                enhancements_count=len([e for e in ai_report.enhancements if e.success])
+            )
         
         # Generate schemas
         schema_collection = schema_generator.generate(content)
@@ -226,6 +258,8 @@ async def generate_schema(request: GenerateRequest):
             schemas=schema_collection.schemas,
             script_tag=schema_collection.to_script_tag(),
             trace_id=trace_id,
+            ai_enhanced=ai_report.ai_enhanced if ai_report else False,
+            ai_enhancements=ai_report.to_dict()["enhancements"] if ai_report else None,
         )
         
     except Exception as e:

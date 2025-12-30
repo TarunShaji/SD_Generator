@@ -100,6 +100,9 @@ class ArticleSchema(SchemaBase):
     datePublished: Optional[str] = None
     dateModified: Optional[str] = None
     mainEntityOfPage: Optional[str] = None
+    inLanguage: Optional[str] = None  # From <html lang>
+    articleSection: Optional[str] = None  # From breadcrumbs/category
+    isPartOf: Optional[Dict[str, Any]] = None  # WebSite context
 
 
 class BlogPostingSchema(ArticleSchema):
